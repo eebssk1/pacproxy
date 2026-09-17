@@ -18,7 +18,7 @@ import (
 const Name = "pacproxy"
 
 // Version of the app
-const Version = "2.0.7"
+const Version = "2.1.0"
 
 // About the app
 const About = "A no-frills local HTTP proxy server powered by a proxy auto-config (PAC) file"
@@ -31,6 +31,7 @@ var (
 	fListen     string
 	fVerbose    bool
 	fResolveURL string
+	fCacheTTL   time.Duration
 )
 
 func init() {
@@ -38,6 +39,13 @@ func init() {
 	flag.StringVar(&fListen, "l", "127.0.0.1:8080", "Interface and port to listen on")
 	flag.BoolVar(&fVerbose, "v", false, "send verbose output to STDERR")
 	flag.StringVar(&fResolveURL, "r", "", "Resolve the proxies for the provided url to STDOUT and exit")
+	flag.DurationVar(
+		&fCacheTTL,
+		"t",
+		pac.DefaultProxyCacheTTL,
+		"how long a PAC decision is cached, keyed on URL host+path "+
+			"(0 disables caching; set 0 for scripts that branch on time)",
+	)
 }
 
 func main() {
@@ -62,6 +70,7 @@ func main() {
 
 	if fVerbose {
 		log.SetOutput(os.Stderr)
+		verbose = true
 	} else {
 		log.SetOutput(io.Discard)
 	}
@@ -77,13 +86,35 @@ func main() {
 	}
 	defer otto.Stop()
 
-	initSignalNotify(otto)
+	// Cache PAC decisions (keyed on host+path) so the JavaScript VM (which
+	// serialises all callers under one lock) stays off the hot path. A
+	// SIGHUP reload swaps the VM *and* flushes this cache, so edited PAC
+	// files take effect immediately rather than after the TTL.
+	finder := pac.NewCachingProxyFinder(otto, pac.WithProxyCacheTTL(fCacheTTL))
+	initSignalNotify(&reloadManager{engine: otto, finder: finder})
 
 	if fResolveURL != "" {
 		do_resolve(otto)
 		return
 	}
-	listen(otto)
+	listen(finder)
+}
+
+// reloadManager reloads the PAC engine and clears cached decisions so a
+// reloaded script's effects are observed without waiting for TTL expiry.
+type reloadManager struct {
+	engine *pac.OttoEngine
+	finder *pac.CachingProxyFinder
+}
+
+func (m *reloadManager) Start() error { return m.engine.Start() }
+func (m *reloadManager) Stop() error  { return m.engine.Stop() }
+func (m *reloadManager) Reload() error {
+	if err := m.engine.Reload(); err != nil {
+		return err
+	}
+	m.finder.Invalidate("")
+	return nil
 }
 
 func exitWithUsage(message string) {
@@ -109,13 +140,13 @@ func do_resolve(otto *pac.OttoEngine) {
 	}
 }
 
-func listen(otto *pac.OttoEngine) {
+func listen(finder pac.ProxyFinder) {
 	srv := &http.Server{
 		Addr:              fListen,
 		ReadHeaderTimeout: 2 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		Handler: newProxyHTTPHandler(
-			otto,
+			finder,
 			&pac.FirstItemSelector{},
 			newNonProxyHTTPHandler(),
 		),

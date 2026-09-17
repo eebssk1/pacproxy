@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"net"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -92,23 +91,30 @@ func DNSDomainIs(host, domain string) bool {
 }
 
 // ShExpMatch will attempt to match hostname or URL to a specified shell expression, and returns true if matched.
+//
+// The compiled regular expression for each shell expression is cached so PAC
+// scripts that evaluate the same expression on every request do not pay the
+// conversion and compile cost each time.
 func ShExpMatch(str, shexp string) bool {
-	shexp = strings.Replace(shexp, ".", "\\.", -1)
-	shexp = strings.Replace(shexp, "?", ".?", -1)
-	shexp = strings.Replace(shexp, "*", ".*", -1)
-	matched, err := regexp.MatchString("^"+shexp+"$", str)
-	return err == nil && matched
+	re, err := shExpRegexp(shexp)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(str)
 }
 
 // IsInNet evaluates the IP address of a hostname, and if within a specified
 // subnet returns true. If a hostname is passed the function will resolve the
 // hostname to an IP address.
+//
+// Host resolution results are served from the bounded DNS cache to avoid
+// repeated lookups for the same host.
 func IsInNet(host, netip, netmask string) bool {
 	if len(host) == 0 {
 		return false
 	}
-	address, err := net.ResolveIPAddr("ip", host)
-	if err != nil {
+	address, err := resolveHostCached(host)
+	if err != nil || address == nil {
 		return false
 	}
 	network := net.IPNet{
@@ -128,9 +134,12 @@ func MyIPAddress() string {
 }
 
 // DNSResolve returns the IP address of the host.
+//
+// Successful and failed lookups are memoised in the bounded DNS cache so a
+// busy PAC script resolves each host at most once per TTL window.
 func DNSResolve(host string) string {
-	address, err := net.ResolveIPAddr("ip", host)
-	if err != nil {
+	address, err := resolveHostCached(host)
+	if err != nil || address == nil {
 		return ""
 	}
 	return address.String()
@@ -154,15 +163,13 @@ func LocalHostOrDomainIs(host, hostdom string) bool {
 }
 
 // IsResolvable attempts to resolve a hostname to an IP address and returns
-// true if successful.
+// true if successful. Results are served from the bounded DNS cache.
 func IsResolvable(host string) bool {
 	if len(host) == 0 {
 		return false
 	}
-	if _, err := net.ResolveIPAddr("ip", host); err != nil {
-		return false
-	}
-	return true
+	addr, err := resolveHostCached(host)
+	return err == nil && addr != nil
 }
 
 // DNSDomainLevels returns the number of DNS domain levels (number of dots)
