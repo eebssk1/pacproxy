@@ -1,0 +1,72 @@
+name: build
+
+on:
+  push:
+    branches: ["master", "main"]
+  workflow_dispatch:
+
+jobs:
+  build-x86:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/eebssk1/debian-trixie:latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: updateNinstall
+        run: |
+          apt-get -y update && apt-get -y upgrade --autoremove --purge
+          apt-get -y install curl ca-certificates file
+
+      - name: load toolchains
+        run: |
+          curl -sL "https://github.com/eebssk1/aio_tc_build/releases/latest/download/x86_64-linux-gnu-native.tb2" | tar -C /opt --bz -x
+          curl -sL "https://go.dev/dl/go1.27.1.linux-amd64.tar.gz" | tar -C /opt -xz
+          /opt/x86_64-linux-gnu/bin/x86_64-linux-gnu-gcc --version | head -1
+          /opt/go/bin/go version
+
+      - name: test
+        run: |
+          export PATH=/opt/go/bin:/opt/x86_64-linux-gnu/bin:$PATH
+          export GOTOOLCHAIN=local
+          export CGO_ENABLED=1
+          export CC=x86_64-linux-gnu-gcc
+          go vet ./...
+          go test -race ./...
+
+      - name: build
+        run: |
+          export PATH=/opt/go/bin:/opt/x86_64-linux-gnu/bin:$PATH
+          export GOTOOLCHAIN=local
+          export CGO_ENABLED=1
+          export CC=x86_64-linux-gnu-gcc
+          export GOAMD64=v3
+          go build -trimpath \
+            -ldflags="-s -w -linkmode external -extldflags '-static -O2 -s'" \
+            -o pacproxy-linux-x64 .
+          file pacproxy-linux-x64
+
+      - name: pack
+        run: tar --bz -cf pacproxy-linux-x64.tb2 pacproxy-linux-x64
+
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: files-x86
+          path: "pacproxy-linux-x64*"
+
+      - name: delete tag if exists
+        uses: ClementTsang/delete-tag-and-release@v0.4.0
+        continue-on-error: true
+        with:
+          delete_release: true
+          tag_name: nightly
+
+      - name: release
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          artifacts: "*.tb2"
+          commit: master
+          makeLatest: true
+          tag: nightly
