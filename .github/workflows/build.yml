@@ -41,6 +41,7 @@ jobs:
           export CGO_ENABLED=1
           export CC=x86_64-linux-gnu-gcc
           export GOAMD64=v3
+          git config --global --add safe.directory '*'
           go build -trimpath \
             -ldflags="-s -w -linkmode external -extldflags '-static -O2 -s'" \
             -o pacproxy-linux-x64 .
